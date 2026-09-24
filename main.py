@@ -83,6 +83,40 @@ Base.metadata.create_all(bind=engine)
 
 
 # =========================
+# Auto-seed a demo rider
+# -------------------------
+# The order-creation logic below requires at least one available rider
+# to exist in the database (it assigns the nearest one to a new order).
+# On a brand new database (e.g. right after deploying, or after a
+# redeploy that wipes local storage), the riders table starts empty,
+# which made POST /api/orders fail with "No available riders" until
+# someone manually called POST /api/riders first. This seeds one demo
+# rider automatically on startup so that doesn't block testing.
+# Feel free to change the starting coordinates below, or remove this
+# once real riders are being registered through the app.
+# =========================
+
+def seed_demo_rider():
+    db = SessionLocal()
+    try:
+        if db.query(Rider).count() == 0:
+            demo_rider = Rider(
+                name="Demo Rider",
+                phone="0000000000",
+                latitude=24.8607,   # change to a real starting point if you like
+                longitude=67.0011,
+                available=True,
+            )
+            db.add(demo_rider)
+            db.commit()
+    finally:
+        db.close()
+
+
+seed_demo_rider()
+
+
+# =========================
 # FastAPI
 # =========================
 
@@ -563,11 +597,6 @@ async def connect(sid, environ, auth):
 
 
 @sio.event
-async def connect(sid, environ, auth):
-    print(f"Socket connected: {sid}")
-
-
-@sio.event
 async def disconnect(sid):
     print(f"Socket disconnected: {sid}")
 
@@ -839,5 +868,3 @@ if __name__ == "__main__":
         port=port,
         reload=False,
     )
-
-
