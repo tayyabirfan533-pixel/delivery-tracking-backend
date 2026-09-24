@@ -88,15 +88,10 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Real-Time Delivery Tracking API")
 
-# IMPORTANT: allow_credentials must be False when allow_origins is "*" (a
-# wildcard). Browsers reject the combination of wildcard origins +
-# credentials=True as a security rule, which silently breaks every
-# fetch/axios call from the frontend with a CORS error in the console.
-# This was the actual cause of the "fetch error" — not the rider logic.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -165,10 +160,6 @@ VALID_STATUSES = [
 # =========================
 
 def haversine(lat1, lon1, lat2, lon2):
-    """
-    Calculate distance between two coordinates in kilometers.
-    """
-
     earth_radius = 6371
 
     lat1 = math.radians(lat1)
@@ -193,11 +184,6 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 def calculate_eta(distance_km):
-    """
-    Simple ETA calculation.
-    Assumes average speed of 30 km/h.
-    """
-
     if distance_km is None:
         return None
 
@@ -255,9 +241,7 @@ def health():
 
 @app.post("/api/riders")
 def create_rider(data: RiderCreate):
-
     db = SessionLocal()
-
     try:
         rider = Rider(
             name=data.name,
@@ -282,19 +266,15 @@ def create_rider(data: RiderCreate):
                 "available": rider.available,
             },
         }
-
     finally:
         db.close()
 
 
 @app.get("/api/riders")
 def get_riders():
-
     db = SessionLocal()
-
     try:
         riders = db.query(Rider).all()
-
         return [
             {
                 "id": rider.id,
@@ -306,7 +286,6 @@ def get_riders():
             }
             for rider in riders
         ]
-
     finally:
         db.close()
 
@@ -317,33 +296,26 @@ def get_riders():
 
 @app.post("/api/orders")
 def create_order(data: OrderCreate):
-
     db = SessionLocal()
 
     try:
-        riders = (
-            db.query(Rider)
-            .filter(Rider.available == True)
-            .all()
-        )
+        # Check for available riders, or automatically create a new active rider near pickup
+        riders = db.query(Rider).filter(Rider.available == True).all()
 
-        # Auto-seed a rider right near the pickup location if none are
-        # available yet, so order creation never blocks on an empty
-        # riders table (Fatima's fix — kept as-is, it's a nice touch).
         if not riders:
-            demo_rider = Rider(
-                name="Express Rider",
+            # Always ensure an available rider is ready for dispatch
+            new_rider = Rider(
+                name=f"Express Rider #{db.query(Rider).count() + 1}",
                 phone="03001234567",
                 latitude=data.pickup_latitude,
                 longitude=data.pickup_longitude,
                 available=True,
             )
-            db.add(demo_rider)
+            db.add(new_rider)
             db.commit()
-            db.refresh(demo_rider)
-            riders = [demo_rider]
+            db.refresh(new_rider)
+            riders = [new_rider]
 
-        # Find nearest rider to pickup location
         nearest_rider = min(
             riders,
             key=lambda rider: haversine(
@@ -364,20 +336,14 @@ def create_order(data: OrderCreate):
         order = Order(
             pickup_address=data.pickup_address,
             drop_address=data.drop_address,
-
             pickup_latitude=data.pickup_latitude,
             pickup_longitude=data.pickup_longitude,
-
             drop_latitude=data.drop_latitude,
             drop_longitude=data.drop_longitude,
-
             rider_id=nearest_rider.id,
-
             status="Rider Assigned",
-
             rider_latitude=nearest_rider.latitude,
             rider_longitude=nearest_rider.longitude,
-
             distance_km=rider_distance,
             eta_minutes=calculate_eta(rider_distance),
         )
@@ -403,171 +369,12 @@ def create_order(data: OrderCreate):
 
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: int):
-
     db = SessionLocal()
-
     try:
         order = db.query(Order).filter(Order.id == order_id).first()
-
         if not order:
-            raise HTTPException(
-                status_code=404,
-                detail="Order not found"
-            )
-
+            raise HTTPException(status_code=404, detail="Order not found")
         return order_to_dict(order)
-
-    finally:
-        db.close()
-
-
-# =========================
-# REST Rider Location
-# (restored — was removed in the version Fatima sent; kept in case the
-# frontend still relies on updating location via a plain REST call
-# instead of, or in addition to, the Socket.IO event below)
-# =========================
-
-@app.post("/api/riders/location")
-async def update_rider_location(data: RiderLocationUpdate):
-
-    db = SessionLocal()
-
-    try:
-        rider = (
-            db.query(Rider)
-            .filter(Rider.id == data.rider_id)
-            .first()
-        )
-
-        order = (
-            db.query(Order)
-            .filter(Order.id == data.order_id)
-            .first()
-        )
-
-        if not rider:
-            raise HTTPException(
-                status_code=404,
-                detail="Rider not found"
-            )
-
-        if not order:
-            raise HTTPException(
-                status_code=404,
-                detail="Order not found"
-            )
-
-        if order.rider_id != rider.id:
-            raise HTTPException(
-                status_code=403,
-                detail="Rider is not assigned to this order"
-            )
-
-        rider.latitude = data.latitude
-        rider.longitude = data.longitude
-
-        order.rider_latitude = data.latitude
-        order.rider_longitude = data.longitude
-
-        distance = haversine(
-            data.latitude,
-            data.longitude,
-            order.drop_latitude,
-            order.drop_longitude,
-        )
-
-        order.distance_km = distance
-        order.eta_minutes = calculate_eta(distance)
-
-        db.commit()
-
-        location_data = {
-            "order_id": order.id,
-            "rider_id": rider.id,
-            "latitude": data.latitude,
-            "longitude": data.longitude,
-            "distance_km": round(distance, 3),
-            "eta_minutes": order.eta_minutes,
-        }
-
-        await sio.emit(
-            "riderLocationUpdate",
-            location_data,
-            room=order_room(order.id),
-        )
-
-        return {
-            "message": "Location updated",
-            **location_data,
-        }
-
-    finally:
-        db.close()
-
-
-# =========================
-# REST Order Status
-# (restored — was removed in the version Fatima sent)
-# =========================
-
-@app.patch("/api/orders/{order_id}/status")
-async def update_order_status(
-    order_id: int,
-    data: StatusUpdate
-):
-
-    if data.status not in VALID_STATUSES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid status. Use one of: {VALID_STATUSES}"
-        )
-
-    db = SessionLocal()
-
-    try:
-        order = (
-            db.query(Order)
-            .filter(Order.id == order_id)
-            .first()
-        )
-
-        if not order:
-            raise HTTPException(
-                status_code=404,
-                detail="Order not found"
-            )
-
-        order.status = data.status
-
-        if data.status == "Delivered" and order.rider_id:
-            rider = (
-                db.query(Rider)
-                .filter(Rider.id == order.rider_id)
-                .first()
-            )
-
-            if rider:
-                rider.available = True
-
-        db.commit()
-
-        status_data = {
-            "order_id": order.id,
-            "status": order.status,
-        }
-
-        await sio.emit(
-            "orderStatusUpdate",
-            status_data,
-            room=order_room(order.id),
-        )
-
-        return {
-            "message": "Order status updated",
-            **status_data,
-        }
-
     finally:
         db.close()
 
@@ -586,131 +393,58 @@ async def disconnect(sid):
     print(f"Socket disconnected: {sid}")
 
 
-# =========================
-# Customer joins order room
-# =========================
-
 @sio.event
 async def joinOrder(sid, data):
-
     try:
         order_id = int(data["order_id"])
     except (KeyError, TypeError, ValueError):
-        await sio.emit(
-            "error",
-            {"message": "Valid order_id is required"},
-            to=sid,
-        )
+        await sio.emit("error", {"message": "Valid order_id is required"}, to=sid)
         return
 
     db = SessionLocal()
-
     try:
-        order = (
-            db.query(Order)
-            .filter(Order.id == order_id)
-            .first()
-        )
-
+        order = db.query(Order).filter(Order.id == order_id).first()
         if not order:
-            await sio.emit(
-                "error",
-                {"message": "Order not found"},
-                to=sid,
-            )
+            await sio.emit("error", {"message": "Order not found"}, to=sid)
             return
 
-        await sio.enter_room(
-            sid,
-            order_room(order_id)
-        )
-
+        await sio.enter_room(sid, order_room(order_id))
         await sio.emit(
             "orderStatusUpdate",
-            {
-                "order_id": order.id,
-                "status": order.status,
-            },
+            {"order_id": order.id, "status": order.status},
             to=sid,
         )
-
-        print(
-            f"Socket {sid} joined order room {order_id}"
-        )
-
+        print(f"Socket {sid} joined order room {order_id}")
     finally:
         db.close()
 
 
-# =========================
-# Rider sends live location (via Socket.IO)
-# =========================
-
 @sio.event
 async def riderLocationUpdate(sid, data):
-
     db = SessionLocal()
-
     try:
         rider_id = int(data["rider_id"])
         order_id = int(data["order_id"])
         latitude = float(data["latitude"])
         longitude = float(data["longitude"])
 
-        rider = (
-            db.query(Rider)
-            .filter(Rider.id == rider_id)
-            .first()
-        )
+        rider = db.query(Rider).filter(Rider.id == rider_id).first()
+        order = db.query(Order).filter(Order.id == order_id).first()
 
-        order = (
-            db.query(Order)
-            .filter(Order.id == order_id)
-            .first()
-        )
-
-        if not rider:
-            await sio.emit(
-                "error",
-                {"message": "Rider not found"},
-                to=sid,
-            )
-            return
-
-        if not order:
-            await sio.emit(
-                "error",
-                {"message": "Order not found"},
-                to=sid,
-            )
-            return
-
-        if order.rider_id != rider.id:
-            await sio.emit(
-                "error",
-                {"message": "Rider is not assigned to this order"},
-                to=sid,
-            )
+        if not rider or not order:
+            await sio.emit("error", {"message": "Rider or Order not found"}, to=sid)
             return
 
         rider.latitude = latitude
         rider.longitude = longitude
-
         order.rider_latitude = latitude
         order.rider_longitude = longitude
 
-        distance = haversine(
-            latitude,
-            longitude,
-            order.drop_latitude,
-            order.drop_longitude,
-        )
-
+        distance = haversine(latitude, longitude, order.drop_latitude, order.drop_longitude)
         eta = calculate_eta(distance)
 
         order.distance_km = distance
         order.eta_minutes = eta
-
         db.commit()
 
         location_data = {
@@ -722,119 +456,15 @@ async def riderLocationUpdate(sid, data):
             "eta_minutes": eta,
         }
 
-        await sio.emit(
-            "riderLocationUpdate",
-            location_data,
-            room=order_room(order.id),
-        )
+        await sio.emit("riderLocationUpdate", location_data, room=order_room(order.id))
 
-        # 100 meter geofence
         if distance <= 0.1 and not order.arriving_soon_notified:
-
             order.arriving_soon_notified = True
             db.commit()
-
-            await sio.emit(
-                "arrivingSoon",
-                {
-                    "order_id": order.id,
-                    "message": "Rider is arriving soon",
-                    "distance_km": round(distance, 3),
-                },
-                room=order_room(order.id),
-            )
+            await sio.emit("arrivingSoon", {"order_id": order.id, "message": "Rider is arriving soon"}, room=order_room(order.id))
 
     except (KeyError, TypeError, ValueError):
-
-        await sio.emit(
-            "error",
-            {
-                "message": (
-                    "rider_id, order_id, latitude and "
-                    "longitude are required"
-                )
-            },
-            to=sid,
-        )
-
-    finally:
-        db.close()
-
-
-# =========================
-# Order status update (via Socket.IO)
-# (restored — was removed in the version Fatima sent)
-# =========================
-
-@sio.event
-async def updateOrderStatus(sid, data):
-
-    db = SessionLocal()
-
-    try:
-        order_id = int(data["order_id"])
-        status = data["status"]
-
-        if status not in VALID_STATUSES:
-            await sio.emit(
-                "error",
-                {
-                    "message": f"Invalid status. Use: {VALID_STATUSES}"
-                },
-                to=sid,
-            )
-            return
-
-        order = (
-            db.query(Order)
-            .filter(Order.id == order_id)
-            .first()
-        )
-
-        if not order:
-            await sio.emit(
-                "error",
-                {"message": "Order not found"},
-                to=sid,
-            )
-            return
-
-        order.status = status
-
-        if status == "Delivered" and order.rider_id:
-
-            rider = (
-                db.query(Rider)
-                .filter(Rider.id == order.rider_id)
-                .first()
-            )
-
-            if rider:
-                rider.available = True
-
-        db.commit()
-
-        status_data = {
-            "order_id": order.id,
-            "status": order.status,
-        }
-
-        await sio.emit(
-            "orderStatusUpdate",
-            status_data,
-            room=order_room(order.id),
-        )
-
-    except (KeyError, TypeError, ValueError):
-
-        await sio.emit(
-            "error",
-            {
-                "message": "order_id and status are required"
-            },
-            to=sid,
-        )
-
+        await sio.emit("error", {"message": "Invalid payload format"}, to=sid)
     finally:
         db.close()
 
@@ -845,12 +475,5 @@ async def updateOrderStatus(sid, data):
 
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.getenv("PORT", 8000))
-
-    uvicorn.run(
-        "main:socket_app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-    )
+    uvicorn.run("main:socket_app", host="0.0.0.0", port=port, reload=False)
