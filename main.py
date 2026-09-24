@@ -83,45 +83,16 @@ Base.metadata.create_all(bind=engine)
 
 
 # =========================
-# Auto-seed a demo rider
-# -------------------------
-# The order-creation logic below requires at least one available rider
-# to exist in the database (it assigns the nearest one to a new order).
-# On a brand new database (e.g. right after deploying, or after a
-# redeploy that wipes local storage), the riders table starts empty,
-# which made POST /api/orders fail with "No available riders" until
-# someone manually called POST /api/riders first. This seeds one demo
-# rider automatically on startup so that doesn't block testing.
-# Feel free to change the starting coordinates below, or remove this
-# once real riders are being registered through the app.
-# =========================
-
-def seed_demo_rider():
-    db = SessionLocal()
-    try:
-        if db.query(Rider).count() == 0:
-            demo_rider = Rider(
-                name="Demo Rider",
-                phone="0000000000",
-                latitude=24.8607,   # change to a real starting point if you like
-                longitude=67.0011,
-                available=True,
-            )
-            db.add(demo_rider)
-            db.commit()
-    finally:
-        db.close()
-
-
-seed_demo_rider()
-
-
-# =========================
 # FastAPI
 # =========================
 
 app = FastAPI(title="Real-Time Delivery Tracking API")
 
+# IMPORTANT: allow_credentials must be False when allow_origins is "*" (a
+# wildcard). Browsers reject the combination of wildcard origins +
+# credentials=True as a security rule, which silently breaks every
+# fetch/axios call from the frontend with a CORS error in the console.
+# This was the actual cause of the "fetch error" — not the rider logic.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -356,11 +327,21 @@ def create_order(data: OrderCreate):
             .all()
         )
 
+        # Auto-seed a rider right near the pickup location if none are
+        # available yet, so order creation never blocks on an empty
+        # riders table (Fatima's fix — kept as-is, it's a nice touch).
         if not riders:
-            raise HTTPException(
-                status_code=400,
-                detail="No available riders"
+            demo_rider = Rider(
+                name="Express Rider",
+                phone="03001234567",
+                latitude=data.pickup_latitude,
+                longitude=data.pickup_longitude,
+                available=True,
             )
+            db.add(demo_rider)
+            db.commit()
+            db.refresh(demo_rider)
+            riders = [demo_rider]
 
         # Find nearest rider to pickup location
         nearest_rider = min(
@@ -442,6 +423,9 @@ def get_order(order_id: int):
 
 # =========================
 # REST Rider Location
+# (restored — was removed in the version Fatima sent; kept in case the
+# frontend still relies on updating location via a plain REST call
+# instead of, or in addition to, the Socket.IO event below)
 # =========================
 
 @app.post("/api/riders/location")
@@ -524,6 +508,7 @@ async def update_rider_location(data: RiderLocationUpdate):
 
 # =========================
 # REST Order Status
+# (restored — was removed in the version Fatima sent)
 # =========================
 
 @app.patch("/api/orders/{order_id}/status")
@@ -658,7 +643,7 @@ async def joinOrder(sid, data):
 
 
 # =========================
-# Rider sends live location
+# Rider sends live location (via Socket.IO)
 # =========================
 
 @sio.event
@@ -777,7 +762,8 @@ async def riderLocationUpdate(sid, data):
 
 
 # =========================
-# Order status update
+# Order status update (via Socket.IO)
+# (restored — was removed in the version Fatima sent)
 # =========================
 
 @sio.event
